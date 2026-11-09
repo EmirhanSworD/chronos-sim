@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chronos-Sim // Deterministic State Engine</title>
+  <style>
+    :root {
+      --bg-dark: #0a0e17;
+      --card-bg: #121826;
+      --card-border: #1e293b;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --accent-cyan: #38bdf8;
+      --accent-green: #10b981;
+      --accent-amber: #f59e0b;
+      --accent-red: #ef4444;
+      --accent-purple: #a855f7;
+      --canvas-bg: #090d16;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+
+    body {
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background-color: var(--card-bg);
+      border-bottom: 1px solid var(--card-border);
+      padding: 12px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      background: linear-gradient(135deg, #0ea5e9, #8b5cf6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 14px;
+      color: #fff;
+    }
+
+    .brand h1 {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+    }
+
+    .brand span {
+      font-size: 13px;
+      color: var(--text-muted);
+      font-weight: 400;
+      margin-left: 6px;
+    }
+
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      background: rgba(16, 185, 129, 0.1);
+      color: var(--accent-green);
+      padding: 6px 14px;
+      border-radius: 20px;
+      border: 1px solid rgba(16, 185, 129, 0.25);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: var(--accent-green);
+      animation: pulse 1.5s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.85); }
+    }
+
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: auto 420px;
+      gap: 20px;
+      padding: 20px 24px;
+      max-width: 1600px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    @media (max-width: 1200px) {
+      main {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* Simulation Viewport */
+    .sim-container {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .canvas-wrapper {
+      position: relative;
+      background-color: var(--canvas-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      overflow: hidden;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    }
+
+    canvas {
+      display: block;
+      cursor: crosshair;
+    }
+
+    .canvas-overlay-hint {
+      position: absolute;
+      bottom: 12px;
+      left: 12px;
+      font-size: 12px;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid var(--card-border);
+      padding: 6px 12px;
+      border-radius: 6px;
+      color: var(--text-muted);
+      pointer-events: none;
+      backdrop-filter: blur(4px);
+    }
+
+    .controls-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      background-color: var(--card-bg);
+      border: 1px solid var(--card-border);
+      padding: 12px 16px;
+      border-radius: 10px;
+      align-items: center;
+    }
+
+    .btn {
+      background: #1e293b;
+      color: var(--text-main);
+      border: 1px solid #334155;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+
+    .btn:hover {
+      background: #334155;
+      border-color: #475569;
+    }
+
+    .btn-primary {
+      background: #0284c7;
+      border-color: #0369a1;
+    }
+    .btn-primary:hover {
+      background: #0369a1;
+    }
+
+    .btn-danger {
+      background: rgba(239, 68, 68, 0.15);
+      color: #f87171;
+      border-color: rgba(239, 68, 68, 0.3);
+    }
+    .btn-danger:hover {
+      background: rgba(239, 68, 68, 0.25);
+    }
+
+    /* Side Panel */
+    .side-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* Metric Grid */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+
+    .metric-card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .metric-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+
+    .metric-value {
+      font-size: 22px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      color: var(--accent-cyan);
+    }
+
+    .metric-unit {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* Event Log Panel */
+    .log-card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      display: flex;
+      flex-direction: column;
+      height: 540px;
+      overflow: hidden;
+    }
+
+    .log-header {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .log-header h2 {
+      font-size: 14px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .log-header span.badge {
+      font-size: 11px;
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent-cyan);
+      padding: 2px 8px;
+      border-radius: 12px;
+    }
+
+    .log-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .log-controls input {
+      accent-color: var(--accent-cyan);
+    }
+
+    .log-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    .log-list::-webkit-scrollbar {
+      width: 6px;
+    }
+    .log-list::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 3px;
+    }
+
+    .log-item {
+      display: flex;
+      gap: 8px;
+      padding: 6px 8px;
+      background: rgba(15, 23, 42, 0.5);
+      border-radius: 6px;
+      border-left: 3px solid var(--card-border);
+      line-height: 1.4;
+      animation: fadeIn 0.15s ease-out;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .log-tick {
+      color: var(--text-muted);
+      font-weight: 600;
+      min-width: 45px;
+    }
+
+    .log-type {
+      font-weight: 600;
+      border-radius: 3px;
+      padding: 0 4px;
+      font-size: 10px;
+      height: 18px;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .type-OBSTACLE_ADDED {
+      background: rgba(245, 158, 11, 0.2);
+      color: var(--accent-amber);
+      border-left-color: var(--accent-amber);
+    }
+    .type-OBSTACLE_REMOVED {
+      background: rgba(245, 158, 11, 0.1);
+      color: var(--accent-amber);
+    }
+    .type-PATH_CALCULATED {
+      background: rgba(56, 189, 248, 0.2);
+      color: var(--accent-cyan);
+    }
+    .type-AGENT_BLOCKED {
+      background: rgba(239, 68, 68, 0.2);
+      color: var(--accent-red);
+    }
+    .type-AGENT_REACHED_TARGET {
+      background: rgba(16, 185, 129, 0.2);
+      color: var(--accent-green);
+    }
+    .type-AGENT_SPAWNED {
+      background: rgba(168, 85, 247, 0.2);
+      color: var(--accent-purple);
+    }
+    .type-SNAPSHOT_CREATED {
+      background: rgba(148, 163, 184, 0.15);
+      color: var(--text-muted);
+    }
+    .type-AGENT_MOVED {
+      background: rgba(148, 163, 184, 0.08);
+      color: #64748b;
+    }
+
+    .log-detail {
+      color: #cbd5e1;
+      word-break: break-all;
+    }
+
+    /* Legend */
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      font-size: 12px;
+      color: var(--text-muted);
+      padding: 10px 14px;
+      background-color: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .legend-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+    .legend-box {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+    }
+    .legend-line {
+      width: 16px;
+      height: 2px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="brand-icon">C</div>
+      <div>
+        <h1>chronos-sim</h1>
+      </div>
+      <span>// Deterministik Olay Tabanlı Durum Motoru</span>
+    </div>
+    <div class="status-badge">
+      <div class="status-dot"></div>
+      <span id="connection-status">Canlı Yayın (SSE)</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Sol: Canvas ve Kontrol Çubuğu -->
+    <section class="sim-container">
+      <div class="canvas-wrapper">
+        <canvas id="simCanvas" width="750" height="750"></canvas>
+        <div class="canvas-overlay-hint" id="coordHint">Grid: [x: --, y: --] | Engel eklemek/kaldırmak için tıkla</div>
+      </div>
+
+      <div class="controls-bar">
+        <button class="btn btn-primary" id="btnSpawnAgent">
+          <span>+</span> Yeni Ajan Ekle
+        </button>
+        <button class="btn" id="btnTogglePause">
+          <span id="pauseIcon">⏸</span> <span id="pauseText">Durdur</span>
+        </button>
+        <button class="btn btn-danger" id="btnClearObstacles">
+          <span>✕</span> Engelleri Temizle
+        </button>
+      </div>
+
+      <div class="legend">
+        <div class="legend-item">
+          <div class="legend-dot" style="background-color: #38bdf8;"></div>
+          <span>Ajan</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-box" style="background-color: #475569; border: 1px solid #64748b;"></div>
+          <span>Dinamik Engel</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot" style="background-color: #10b981;"></div>
+          <span>Hedef Noktası</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-line" style="background-color: #38bdf8; opacity: 0.8;"></div>
+          <span>A* Rotası</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot" style="background-color: #ef4444;"></div>
+          <span>Bloke Ajan</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Sağ: Metrikler ve Olay Akış Paneli -->
+    <aside class="side-panel">
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <div class="metric-label">Tick Sayacı</div>
+          <div class="metric-value" id="valTick">0</div>
+          <div class="metric-unit">50ms / tick</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">Aktif Ajan</div>
+          <div class="metric-value" id="valAgents" style="color: #a855f7;">0</div>
+          <div class="metric-unit">50x50 ızgara</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">FPS</div>
+          <div class="metric-value" id="valFps" style="color: #10b981;">60</div>
+          <div class="metric-unit">Canvas çizim</div>
+        </div>
+      </div>
+
+      <div class="log-card">
+        <div class="log-header">
+          <h2>
+            Son Olay Logları
+            <span class="badge" id="logCountBadge">SQLite WAL</span>
+          </h2>
+          <div class="log-controls">
+            <label style="cursor: pointer; display: flex; align-items: center; gap: 4px;">
+              <input type="checkbox" id="chkFilterMovement" checked>
+              <span>Hareketleri Gizle</span>
+            </label>
+          </div>
+        </div>
+        <div class="log-list" id="logList">
+          <!-- Canlı olaylar buraya akacak -->
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <script src="/viewer.js"></script>
+</body>
+</html>
