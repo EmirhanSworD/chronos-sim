@@ -1,0 +1,28 @@
+{
+  "name": "chronos-sim",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "ts-node src/server/app.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "benchmark": "ts-node benchmarks/engine.bench.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "express": "^5.3.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.6",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.0"
+  }
+}
