@@ -1,13 +1,13 @@
-import type { Agent, Vector2D } from '../core/Types.js';
+import type { Agent, CellType, Vector2D } from '../core/Types.js';
 export interface SpatialGridOptions {
     readonly width: number;
     readonly height: number;
     readonly cellSize: number;
 }
 /**
- * 2D Spatial Hash Grid
- * Provides O(1) average lookup for near neighbors, dynamic obstacle tracking,
- * and spatial indexing of moving agents without brute-force pairwise distance checks.
+ * 2D Spatial Hash Grid with Terrain Costs & Dynamic Obstacle Tracking.
+ * Provides O(1) average lookup for near neighbors, terrain cell types (EMPTY, WALL, MUD, ROAD, STATION),
+ * dynamic obstacle management, and station queries.
  */
 export declare class SpatialGrid {
     readonly width: number;
@@ -21,6 +21,10 @@ export declare class SpatialGrid {
     private readonly agents;
     /** Map of cellKey -> Obstacle Vector2D */
     private readonly obstacles;
+    /** Map of cellKey -> CellType (MUD, ROAD, STATION, etc.) */
+    private readonly cellTypes;
+    /** Map of cellKey -> Station Vector2D */
+    private readonly stations;
     constructor(options: SpatialGridOptions);
     /** Converts world coordinates to discrete grid cell coordinates */
     worldToCell(pos: Vector2D): {
@@ -37,6 +41,39 @@ export declare class SpatialGrid {
     isInBounds(pos: Vector2D): boolean;
     /** Checks if cell coordinates are inside grid bounds */
     isCellInBounds(cx: number, cy: number): boolean;
+    /**
+     * Sets the terrain type for a cell.
+     */
+    setCellType(cx: number, cy: number, type: CellType): void;
+    /**
+     * Gets the cell type for a cell coordinate.
+     */
+    getCellType(cx: number, cy: number): CellType;
+    /**
+     * Gets the traversal cost of a cell.
+     * EMPTY: 1.0, ROAD: 0.5, MUD: 5.0, STATION: 1.0, WALL: Infinity.
+     */
+    getCellCost(cx: number, cy: number): number;
+    /**
+     * Registers a charging station at the specified position.
+     */
+    addStation(pos: Vector2D): void;
+    /**
+     * Removes a charging station at the specified position.
+     */
+    removeStation(pos: Vector2D): boolean;
+    /** Returns all registered station positions */
+    getStations(): readonly Vector2D[];
+    /**
+     * Finds the nearest charging station to a given position.
+     */
+    findNearestStation(pos: Vector2D): Vector2D | null;
+    /** Returns all customized cell types */
+    getAllCellTypes(): readonly {
+        readonly x: number;
+        readonly y: number;
+        readonly type: CellType;
+    }[];
     /**
      * Registers a dynamic obstacle at the given position.
      * Returns true if newly added, false if already present or out of bounds.
@@ -56,7 +93,7 @@ export declare class SpatialGrid {
      */
     hasObstacleAtCell(cx: number, cy: number): boolean;
     /**
-     * Checks whether a cell coordinate is traversable (within bounds and no obstacle).
+     * Checks whether a cell coordinate is traversable (within bounds and not a wall).
      */
     isTraversableCell(cx: number, cy: number): boolean;
     /** Returns all registered obstacle positions */
@@ -99,7 +136,7 @@ export declare class SpatialGrid {
      * Retrieves obstacles within a given radius.
      */
     queryObstaclesInRadius(center: Vector2D, radius: number): Vector2D[];
-    /** Resets agents and obstacles */
+    /** Resets agents, obstacles, and cell types */
     clear(): void;
 }
 //# sourceMappingURL=SpatialGrid.d.ts.map

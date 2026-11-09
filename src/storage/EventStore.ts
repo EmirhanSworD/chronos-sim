@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import type {
   SimulationEvent,
   SimulationEventType,
+  SimulationFrame,
   SimulationSnapshot,
 } from '../core/Types.js';
 import { vectorKey } from '../core/Types.js';
@@ -23,6 +24,13 @@ interface SnapshotRow {
   readonly state: string;
 }
 
+interface FrameRow {
+  readonly tick: number;
+  readonly timestamp: number;
+  readonly agent_count: number;
+  readonly state: string;
+}
+
 interface CountRow {
   readonly count: number;
 }
@@ -36,15 +44,17 @@ export interface EventStoreOptions {
 
 /**
  * High-Performance Event Store backed by SQLite with WAL (Write-Ahead-Log) mode.
- * Supports transactional appending of events and simulation snapshots,
- * enabling full state reconstruction and deterministic replay.
+ * Supports transactional appending of events, periodic snapshots, and complete per-tick
+ * simulation frames for full deterministic Time-Travel Replay.
  */
 export class EventStore {
   private readonly db: Database.Database;
   private readonly insertEventStmt: Database.Statement;
   private readonly insertSnapshotStmt: Database.Statement;
+  private readonly insertFrameStmt: Database.Statement;
   private readonly batchInsertEventsTx: (events: readonly SimulationEvent[]) => void;
   private readonly saveSnapshotTx: (snapshot: SimulationSnapshot) => void;
+  private readonly saveFrameTx: (frame: SimulationFrame) => void;
 
   constructor(options?: EventStoreOptions) {
     const dbPath = options?.inMemory ? ':memory:' : (options?.path ?? ':memory:');
@@ -61,6 +71,11 @@ export class EventStore {
     this.insertSnapshotStmt = this.db.prepare(`
       INSERT OR REPLACE INTO snapshots (tick, timestamp, agent_count, obstacle_count, state)
       VALUES (?, ?, ?, ?, ?)
+    `);
+
+    this.insertFrameStmt = this.db.prepare(`
+      INSERT OR REPLACE INTO simulation_frames (tick, timestamp, agent_count, state)
+      VALUES (?, ?, ?, ?)
     `);
 
     // Prepare transaction blocks
@@ -88,11 +103,20 @@ export class EventStore {
         stateJson
       );
     });
+
+    this.saveFrameTx = this.db.transaction((frame: SimulationFrame) => {
+      const stateJson = JSON.stringify(frame);
+      this.insertFrameStmt.run(
+        frame.tick,
+        frame.timestamp,
+        frame.agents.length,
+        stateJson
+      );
+    });
   }
 
   private configurePragmas(enableWal: boolean): void {
     if (enableWal) {
-      // Set Write-Ahead Logging mode for concurrency and durability
       this.db.pragma('journal_mode = WAL');
     }
     this.db.pragma('synchronous = NORMAL');
@@ -124,6 +148,15 @@ export class EventStore {
       );
 
       CREATE INDEX IF NOT EXISTS idx_snapshots_tick ON snapshots(tick);
+
+      CREATE TABLE IF NOT EXISTS simulation_frames (
+        tick INTEGER PRIMARY KEY,
+        timestamp INTEGER NOT NULL,
+        agent_count INTEGER NOT NULL,
+        state TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_simulation_frames_tick ON simulation_frames(tick);
     `);
   }
 
@@ -137,10 +170,18 @@ export class EventStore {
       case 'PATH_CALCULATED':
       case 'AGENT_REACHED_TARGET':
       case 'AGENT_BLOCKED':
+      case 'AGENT_EVADING':
+      case 'AGENT_RECHARGING':
+      case 'AGENT_EXHAUSTED':
         return event.agentId;
       case 'OBSTACLE_ADDED':
       case 'OBSTACLE_REMOVED':
+      case 'CELL_TYPE_CHANGED':
         return vectorKey(event.position);
+      case 'THREAT_SPAWNED':
+        return event.threat.id;
+      case 'THREAT_REMOVED':
+        return event.threatId;
       case 'SIMULATION_STARTED':
       case 'SIMULATION_STOPPED':
       case 'SNAPSHOT_CREATED':
@@ -148,9 +189,8 @@ export class EventStore {
     }
   }
 
-  /**
-   * Appends a single event to the database.
-   */
+  // --- Event Persistence ---
+
   public appendEvent(event: SimulationEvent): void {
     const aggregateId = this.extractAggregateId(event);
     const payload = JSON.stringify(event);
@@ -163,9 +203,6 @@ export class EventStore {
     );
   }
 
-  /**
-   * Appends multiple events in an atomic transaction block.
-   */
   public appendEvents(events: readonly SimulationEvent[]): void {
     if (events.length === 0) {
       return;
@@ -173,16 +210,65 @@ export class EventStore {
     this.batchInsertEventsTx(events);
   }
 
-  /**
-   * Saves a full simulation state snapshot in a transaction block.
-   */
+  // --- Snapshot Persistence ---
+
   public saveSnapshot(snapshot: SimulationSnapshot): void {
     this.saveSnapshotTx(snapshot);
   }
 
+  // --- Time-Travel Frame Persistence & Queries ---
+
   /**
-   * Retrieves simulation events within an optional tick range.
+   * Serializes and stores a complete simulation frame for a specific tick.
    */
+  public saveFrame(frame: SimulationFrame): void {
+    this.saveFrameTx(frame);
+  }
+
+  /**
+   * Instantly retrieves the complete simulation frame at an exact historical tick.
+   */
+  public getFrame(tick: number): SimulationFrame | null {
+    const stmt = this.db.prepare('SELECT * FROM simulation_frames WHERE tick = ?');
+    const row = stmt.get(tick) as FrameRow | undefined;
+    if (!row) {
+      return null;
+    }
+    return JSON.parse(row.state) as SimulationFrame;
+  }
+
+  /**
+   * Retrieves a continuous range of historical simulation frames for replay interpolation.
+   */
+  public getHistoryRange(fromTick: number, toTick: number): SimulationFrame[] {
+    const stmt = this.db.prepare(
+      'SELECT * FROM simulation_frames WHERE tick >= ? AND tick <= ? ORDER BY tick ASC'
+    );
+    const rows = stmt.all(fromTick, toTick) as FrameRow[];
+    return rows.map((row) => JSON.parse(row.state) as SimulationFrame);
+  }
+
+  /** Returns total count of recorded simulation frames */
+  public getFrameCount(): number {
+    const stmt = this.db.prepare('SELECT COUNT(*) as count FROM simulation_frames');
+    const row = stmt.get() as CountRow | undefined;
+    return row ? row.count : 0;
+  }
+
+  /** Retrieves the latest recorded simulation frame */
+  public getLatestFrame(): SimulationFrame | null {
+    const stmt = this.db.prepare(
+      'SELECT * FROM simulation_frames ORDER BY tick DESC LIMIT 1'
+    );
+    const row = stmt.get() as FrameRow | undefined;
+    if (!row) {
+      return null;
+    }
+    return JSON.parse(row.state) as SimulationFrame;
+  }
+
+  // --- Event Queries ---
+
   public getEvents(fromTick = 0, toTick?: number): SimulationEvent[] {
     let rows: EventRow[];
     if (toTick !== undefined) {
@@ -200,9 +286,6 @@ export class EventStore {
     return rows.map((row) => JSON.parse(row.payload) as SimulationEvent);
   }
 
-  /**
-   * Retrieves events filtered by event type.
-   */
   public getEventsByType(eventType: SimulationEventType): SimulationEvent[] {
     const stmt = this.db.prepare(
       'SELECT * FROM events WHERE event_type = ? ORDER BY id ASC'
@@ -211,9 +294,6 @@ export class EventStore {
     return rows.map((row) => JSON.parse(row.payload) as SimulationEvent);
   }
 
-  /**
-   * Retrieves all events associated with a specific agent.
-   */
   public getEventsForAgent(agentId: string): SimulationEvent[] {
     const stmt = this.db.prepare(
       'SELECT * FROM events WHERE aggregate_id = ? ORDER BY id ASC'
@@ -222,9 +302,6 @@ export class EventStore {
     return rows.map((row) => JSON.parse(row.payload) as SimulationEvent);
   }
 
-  /**
-   * Retrieves the latest snapshot available.
-   */
   public getLatestSnapshot(): SimulationSnapshot | null {
     const stmt = this.db.prepare(
       'SELECT * FROM snapshots ORDER BY tick DESC LIMIT 1'
@@ -236,9 +313,6 @@ export class EventStore {
     return JSON.parse(row.state) as SimulationSnapshot;
   }
 
-  /**
-   * Retrieves the latest snapshot taken at or before the specified tick.
-   */
   public getSnapshotAtOrBefore(tick: number): SimulationSnapshot | null {
     const stmt = this.db.prepare(
       'SELECT * FROM snapshots WHERE tick <= ? ORDER BY tick DESC LIMIT 1'
@@ -250,34 +324,22 @@ export class EventStore {
     return JSON.parse(row.state) as SimulationSnapshot;
   }
 
-  /**
-   * Returns total number of persisted events.
-   */
   public getEventCount(): number {
     const stmt = this.db.prepare('SELECT COUNT(*) as count FROM events');
     const row = stmt.get() as CountRow | undefined;
     return row ? row.count : 0;
   }
 
-  /**
-   * Returns total number of persisted snapshots.
-   */
   public getSnapshotCount(): number {
     const stmt = this.db.prepare('SELECT COUNT(*) as count FROM snapshots');
     const row = stmt.get() as CountRow | undefined;
     return row ? row.count : 0;
   }
 
-  /**
-   * Truncates events and snapshots tables.
-   */
   public clear(): void {
-    this.db.exec('DELETE FROM events; DELETE FROM snapshots;');
+    this.db.exec('DELETE FROM events; DELETE FROM snapshots; DELETE FROM simulation_frames;');
   }
 
-  /**
-   * Closes the database connection safely.
-   */
   public close(): void {
     this.db.close();
   }

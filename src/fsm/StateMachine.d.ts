@@ -1,5 +1,5 @@
 import type { AgentState } from '../core/Types.js';
-export type AgentTrigger = 'START_NAVIGATION' | 'OBSTACLE_BLOCKED' | 'PATH_RESOLVED' | 'TARGET_REACHED' | 'STOP' | 'RESET';
+export type AgentTrigger = 'START_NAVIGATION' | 'START_PATROL' | 'EVADE_THREAT' | 'SEEK_RECHARGE' | 'RECHARGE_COMPLETE' | 'EXHAUST' | 'OBSTACLE_BLOCKED' | 'PATH_RESOLVED' | 'TARGET_REACHED' | 'STOP' | 'RESET';
 export interface TransitionContext {
     readonly agentId: string;
     readonly tick?: number | undefined;
@@ -51,7 +51,7 @@ export declare class StateMachine<TState extends string, TTrigger extends string
 }
 /**
  * Type-Safe Agent State Machine
- * Manages states: IDLE, NAVIGATING, BLOCKED, COMPLETED
+ * Manages states: IDLE, PATROL, NAVIGATING, EVADING, RECHARGING, EXHAUSTED, BLOCKED, COMPLETED
  */
 export declare class AgentStateMachine {
     private readonly fsm;
@@ -60,6 +60,11 @@ export declare class AgentStateMachine {
     get state(): AgentState;
     canTransition(trigger: AgentTrigger): boolean;
     startNavigation(reason?: string): TransitionResult<AgentState>;
+    startPatrol(reason?: string): TransitionResult<AgentState>;
+    evadeThreat(reason?: string): TransitionResult<AgentState>;
+    seekRecharge(reason?: string): TransitionResult<AgentState>;
+    rechargeComplete(reason?: string): TransitionResult<AgentState>;
+    exhaust(reason?: string): TransitionResult<AgentState>;
     block(reason?: string): TransitionResult<AgentState>;
     resolvePath(reason?: string): TransitionResult<AgentState>;
     reachTarget(reason?: string): TransitionResult<AgentState>;

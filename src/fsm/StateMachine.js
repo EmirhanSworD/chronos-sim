@@ -127,7 +127,7 @@ export class StateMachine {
 }
 /**
  * Type-Safe Agent State Machine
- * Manages states: IDLE, NAVIGATING, BLOCKED, COMPLETED
+ * Manages states: IDLE, PATROL, NAVIGATING, EVADING, RECHARGING, EXHAUSTED, BLOCKED, COMPLETED
  */
 export class AgentStateMachine {
     fsm;
@@ -136,23 +136,66 @@ export class AgentStateMachine {
         this.setupTransitions();
     }
     setupTransitions() {
-        // From IDLE
+        // --- From IDLE ---
         this.fsm.addTransition('IDLE', 'START_NAVIGATION', 'NAVIGATING');
+        this.fsm.addTransition('IDLE', 'START_PATROL', 'PATROL');
+        this.fsm.addTransition('IDLE', 'EVADE_THREAT', 'EVADING');
+        this.fsm.addTransition('IDLE', 'SEEK_RECHARGE', 'RECHARGING');
+        this.fsm.addTransition('IDLE', 'EXHAUST', 'EXHAUSTED');
         this.fsm.addTransition('IDLE', 'OBSTACLE_BLOCKED', 'BLOCKED');
         this.fsm.addTransition('IDLE', 'RESET', 'IDLE');
-        // From NAVIGATING
+        // --- From PATROL ---
+        this.fsm.addTransition('PATROL', 'EVADE_THREAT', 'EVADING');
+        this.fsm.addTransition('PATROL', 'SEEK_RECHARGE', 'RECHARGING');
+        this.fsm.addTransition('PATROL', 'OBSTACLE_BLOCKED', 'BLOCKED');
+        this.fsm.addTransition('PATROL', 'START_NAVIGATION', 'NAVIGATING');
+        this.fsm.addTransition('PATROL', 'START_PATROL', 'PATROL');
+        this.fsm.addTransition('PATROL', 'EXHAUST', 'EXHAUSTED');
+        this.fsm.addTransition('PATROL', 'STOP', 'IDLE');
+        this.fsm.addTransition('PATROL', 'RESET', 'IDLE');
+        // --- From NAVIGATING ---
+        this.fsm.addTransition('NAVIGATING', 'EVADE_THREAT', 'EVADING');
+        this.fsm.addTransition('NAVIGATING', 'SEEK_RECHARGE', 'RECHARGING');
         this.fsm.addTransition('NAVIGATING', 'OBSTACLE_BLOCKED', 'BLOCKED');
         this.fsm.addTransition('NAVIGATING', 'TARGET_REACHED', 'COMPLETED');
-        this.fsm.addTransition('NAVIGATING', 'START_NAVIGATION', 'NAVIGATING'); // Re-target / path recalculation
+        this.fsm.addTransition('NAVIGATING', 'START_NAVIGATION', 'NAVIGATING');
+        this.fsm.addTransition('NAVIGATING', 'START_PATROL', 'PATROL');
+        this.fsm.addTransition('NAVIGATING', 'EXHAUST', 'EXHAUSTED');
         this.fsm.addTransition('NAVIGATING', 'STOP', 'IDLE');
         this.fsm.addTransition('NAVIGATING', 'RESET', 'IDLE');
-        // From BLOCKED
+        // --- From EVADING ---
+        this.fsm.addTransition('EVADING', 'EVADE_THREAT', 'EVADING');
+        this.fsm.addTransition('EVADING', 'SEEK_RECHARGE', 'RECHARGING');
+        this.fsm.addTransition('EVADING', 'START_PATROL', 'PATROL');
+        this.fsm.addTransition('EVADING', 'START_NAVIGATION', 'NAVIGATING');
+        this.fsm.addTransition('EVADING', 'EXHAUST', 'EXHAUSTED');
+        this.fsm.addTransition('EVADING', 'STOP', 'IDLE');
+        this.fsm.addTransition('EVADING', 'RESET', 'IDLE');
+        // --- From RECHARGING ---
+        this.fsm.addTransition('RECHARGING', 'EVADE_THREAT', 'EVADING');
+        this.fsm.addTransition('RECHARGING', 'RECHARGE_COMPLETE', 'IDLE');
+        this.fsm.addTransition('RECHARGING', 'START_PATROL', 'PATROL');
+        this.fsm.addTransition('RECHARGING', 'START_NAVIGATION', 'NAVIGATING');
+        this.fsm.addTransition('RECHARGING', 'EXHAUST', 'EXHAUSTED');
+        this.fsm.addTransition('RECHARGING', 'STOP', 'IDLE');
+        this.fsm.addTransition('RECHARGING', 'RESET', 'IDLE');
+        // --- From EXHAUSTED ---
+        this.fsm.addTransition('EXHAUSTED', 'SEEK_RECHARGE', 'RECHARGING');
+        this.fsm.addTransition('EXHAUSTED', 'RESET', 'IDLE');
+        // --- From BLOCKED ---
+        this.fsm.addTransition('BLOCKED', 'EVADE_THREAT', 'EVADING');
         this.fsm.addTransition('BLOCKED', 'PATH_RESOLVED', 'NAVIGATING');
         this.fsm.addTransition('BLOCKED', 'START_NAVIGATION', 'NAVIGATING');
+        this.fsm.addTransition('BLOCKED', 'START_PATROL', 'PATROL');
+        this.fsm.addTransition('BLOCKED', 'SEEK_RECHARGE', 'RECHARGING');
+        this.fsm.addTransition('BLOCKED', 'EXHAUST', 'EXHAUSTED');
         this.fsm.addTransition('BLOCKED', 'STOP', 'IDLE');
         this.fsm.addTransition('BLOCKED', 'RESET', 'IDLE');
-        // From COMPLETED
+        // --- From COMPLETED ---
         this.fsm.addTransition('COMPLETED', 'START_NAVIGATION', 'NAVIGATING');
+        this.fsm.addTransition('COMPLETED', 'START_PATROL', 'PATROL');
+        this.fsm.addTransition('COMPLETED', 'SEEK_RECHARGE', 'RECHARGING');
+        this.fsm.addTransition('COMPLETED', 'EVADE_THREAT', 'EVADING');
         this.fsm.addTransition('COMPLETED', 'RESET', 'IDLE');
         this.fsm.addTransition('COMPLETED', 'STOP', 'IDLE');
     }
@@ -164,6 +207,21 @@ export class AgentStateMachine {
     }
     startNavigation(reason) {
         return this.fsm.trigger('START_NAVIGATION', reason);
+    }
+    startPatrol(reason) {
+        return this.fsm.trigger('START_PATROL', reason);
+    }
+    evadeThreat(reason) {
+        return this.fsm.trigger('EVADE_THREAT', reason);
+    }
+    seekRecharge(reason) {
+        return this.fsm.trigger('SEEK_RECHARGE', reason);
+    }
+    rechargeComplete(reason) {
+        return this.fsm.trigger('RECHARGE_COMPLETE', reason);
+    }
+    exhaust(reason) {
+        return this.fsm.trigger('EXHAUST', reason);
     }
     block(reason) {
         return this.fsm.trigger('OBSTACLE_BLOCKED', reason);

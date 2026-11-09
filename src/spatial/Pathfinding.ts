@@ -136,9 +136,9 @@ interface Direction {
 }
 
 /**
- * Optimized A* (A-Star) Pathfinding Algorithm.
- * Supports dynamic obstacles, 8-directional movement, corner-cutting prevention,
- * and admissible Octile heuristic with deterministic tie-breaking.
+ * Optimized A* (A-Star) Pathfinding Algorithm with Terrain Costs.
+ * Evaluates variable cell movement costs (EMPTY: 1, ROAD: 0.5, MUD: 5, WALL: Infinity),
+ * selects the cheapest available route, and supports 8-directional movement with corner-cutting prevention.
  */
 export class AStarPathfinder {
   private readonly grid: SpatialGrid;
@@ -177,27 +177,33 @@ export class AStarPathfinder {
   }
 
   /**
-   * Calculates the shortest path between start and target world coordinates.
-   * Returns an array of waypoints (cell centers in world coordinates),
-   * excluding the starting point and including the target.
-   * Returns empty array if no traversable path exists.
+   * Calculates the cheapest path between start and target world coordinates,
+   * factoring in terrain costs (gCost += terrainCost * stepDistance).
    */
   public findPath(start: Vector2D, target: Vector2D): Vector2D[] {
+    const result = this.findPathWithCost(start, target);
+    return result.path;
+  }
+
+  /**
+   * Calculates the cheapest path and returns both waypoints and accumulated traversal cost.
+   */
+  public findPathWithCost(start: Vector2D, target: Vector2D): { readonly path: Vector2D[]; readonly totalCost: number } {
     const startCell = this.grid.worldToCell(start);
     const targetCell = this.grid.worldToCell(target);
 
-    // If out of bounds or target is blocked, no path exists
+    // If out of bounds or target is a wall, no path exists
     if (!this.grid.isCellInBounds(startCell.cx, startCell.cy) || !this.grid.isCellInBounds(targetCell.cx, targetCell.cy)) {
-      return [];
+      return { path: [], totalCost: Infinity };
     }
 
-    if (this.grid.hasObstacleAtCell(targetCell.cx, targetCell.cy)) {
-      return [];
+    if (!this.grid.isTraversableCell(targetCell.cx, targetCell.cy)) {
+      return { path: [], totalCost: Infinity };
     }
 
     // Already at target cell
     if (startCell.cx === targetCell.cx && startCell.cy === targetCell.cy) {
-      return [{ x: target.x, y: target.y }];
+      return { path: [{ x: target.x, y: target.y }], totalCost: 0 };
     }
 
     const openHeap = new MinHeap();
@@ -224,7 +230,7 @@ export class AStarPathfinder {
     while (!openHeap.isEmpty()) {
       if (++iterations > this.maxIterations) {
         // Exceeded budget, path unreachable within limits
-        return [];
+        return { path: [], totalCost: Infinity };
       }
 
       const current = openHeap.pop();
@@ -236,15 +242,23 @@ export class AStarPathfinder {
 
       // Target reached!
       if (current.cx === targetCell.cx && current.cy === targetCell.cy) {
-        return this.reconstructPath(current, target);
+        return {
+          path: this.reconstructPath(current, target),
+          totalCost: current.g,
+        };
       }
 
       for (const dir of this.directions) {
         const nx = current.cx + dir.dx;
         const ny = current.cy + dir.dy;
 
-        // Bounds and obstacle check
+        // Bounds and traversability check
         if (!this.grid.isTraversableCell(nx, ny)) {
+          continue;
+        }
+
+        const terrainCost = this.grid.getCellCost(nx, ny);
+        if (terrainCost === Infinity) {
           continue;
         }
 
@@ -264,7 +278,9 @@ export class AStarPathfinder {
           continue;
         }
 
-        const tentativeG = current.g + dir.cost;
+        // Calculate step cost: step direction cost * terrain cost multiplier
+        const stepCost = dir.cost * terrainCost;
+        const tentativeG = current.g + stepCost;
 
         if (!neighbor) {
           const h = this.heuristic(nx, ny, targetCell.cx, targetCell.cy);
@@ -291,24 +307,26 @@ export class AStarPathfinder {
     }
 
     // No path found
-    return [];
+    return { path: [], totalCost: Infinity };
   }
 
   /**
-   * Admissible Octile heuristic for 8-directional movement,
-   * falls back to Manhattan heuristic if diagonal is disabled.
+   * Admissible Octile heuristic scaled by the minimum possible terrain cost (ROAD = 0.5)
+   * to guarantee that A* never overestimates and consistently finds the cost-optimal route.
    */
   private heuristic(x1: number, y1: number, x2: number, y2: number): number {
     const dx = Math.abs(x1 - x2);
     const dy = Math.abs(y1 - y2);
+    const minTerrainCost = 0.5; // ROAD cell cost
 
     if (!this.allowDiagonal) {
-      return (dx + dy) * this.cardinalCost;
+      return (dx + dy) * this.cardinalCost * minTerrainCost;
     }
 
     const minD = Math.min(dx, dy);
     const maxD = Math.max(dx, dy);
-    return (this.diagonalCost - this.cardinalCost) * minD + this.cardinalCost * maxD;
+    const baseOctile = (this.diagonalCost - this.cardinalCost) * minD + this.cardinalCost * maxD;
+    return baseOctile * minTerrainCost;
   }
 
   /**

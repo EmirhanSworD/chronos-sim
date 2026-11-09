@@ -1,5 +1,5 @@
-import type { Agent, Vector2D } from '../core/Types.js';
-import { vectorDistanceSq } from '../core/Types.js';
+import type { Agent, CellType, Vector2D } from '../core/Types.js';
+import { CELL_COST, vectorDistanceSq } from '../core/Types.js';
 
 export interface SpatialGridOptions {
   readonly width: number;
@@ -8,9 +8,9 @@ export interface SpatialGridOptions {
 }
 
 /**
- * 2D Spatial Hash Grid
- * Provides O(1) average lookup for near neighbors, dynamic obstacle tracking,
- * and spatial indexing of moving agents without brute-force pairwise distance checks.
+ * 2D Spatial Hash Grid with Terrain Costs & Dynamic Obstacle Tracking.
+ * Provides O(1) average lookup for near neighbors, terrain cell types (EMPTY, WALL, MUD, ROAD, STATION),
+ * dynamic obstacle management, and station queries.
  */
 export class SpatialGrid {
   readonly width: number;
@@ -27,6 +27,12 @@ export class SpatialGrid {
 
   /** Map of cellKey -> Obstacle Vector2D */
   private readonly obstacles: Map<string, Vector2D> = new Map();
+
+  /** Map of cellKey -> CellType (MUD, ROAD, STATION, etc.) */
+  private readonly cellTypes: Map<string, CellType> = new Map();
+
+  /** Map of cellKey -> Station Vector2D */
+  private readonly stations: Map<string, Vector2D> = new Map();
 
   constructor(options: SpatialGridOptions) {
     if (options.width <= 0 || options.height <= 0 || options.cellSize <= 0) {
@@ -78,6 +84,106 @@ export class SpatialGrid {
     return cx >= 0 && cx < this.cols && cy >= 0 && cy < this.rows;
   }
 
+  // --- Terrain & Cell Type Management ---
+
+  /**
+   * Sets the terrain type for a cell.
+   */
+  public setCellType(cx: number, cy: number, type: CellType): void {
+    if (!this.isCellInBounds(cx, cy)) {
+      return;
+    }
+    const key = this.cellKey(cx, cy);
+    if (type === 'EMPTY') {
+      this.cellTypes.delete(key);
+      this.stations.delete(key);
+    } else {
+      this.cellTypes.set(key, type);
+      if (type === 'STATION') {
+        this.stations.set(key, this.cellToWorld(cx, cy));
+      } else {
+        this.stations.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Gets the cell type for a cell coordinate.
+   */
+  public getCellType(cx: number, cy: number): CellType {
+    const key = this.cellKey(cx, cy);
+    if (this.obstacles.has(key)) {
+      return 'WALL';
+    }
+    return this.cellTypes.get(key) ?? 'EMPTY';
+  }
+
+  /**
+   * Gets the traversal cost of a cell.
+   * EMPTY: 1.0, ROAD: 0.5, MUD: 5.0, STATION: 1.0, WALL: Infinity.
+   */
+  public getCellCost(cx: number, cy: number): number {
+    const type = this.getCellType(cx, cy);
+    return CELL_COST[type] ?? 1.0;
+  }
+
+  /**
+   * Registers a charging station at the specified position.
+   */
+  public addStation(pos: Vector2D): void {
+    const { cx, cy } = this.worldToCell(pos);
+    this.setCellType(cx, cy, 'STATION');
+  }
+
+  /**
+   * Removes a charging station at the specified position.
+   */
+  public removeStation(pos: Vector2D): boolean {
+    const { cx, cy } = this.worldToCell(pos);
+    const key = this.cellKey(cx, cy);
+    if (this.stations.has(key)) {
+      this.stations.delete(key);
+      this.cellTypes.delete(key);
+      return true;
+    }
+    return false;
+  }
+
+  /** Returns all registered station positions */
+  public getStations(): readonly Vector2D[] {
+    return Array.from(this.stations.values());
+  }
+
+  /**
+   * Finds the nearest charging station to a given position.
+   */
+  public findNearestStation(pos: Vector2D): Vector2D | null {
+    let nearest: Vector2D | null = null;
+    let minDistSq = Infinity;
+
+    for (const station of this.stations.values()) {
+      const dSq = vectorDistanceSq(pos, station);
+      if (dSq < minDistSq) {
+        minDistSq = dSq;
+        nearest = station;
+      }
+    }
+
+    return nearest;
+  }
+
+  /** Returns all customized cell types */
+  public getAllCellTypes(): readonly { readonly x: number; readonly y: number; readonly type: CellType }[] {
+    const results: { x: number; y: number; type: CellType }[] = [];
+    for (const [key, type] of this.cellTypes.entries()) {
+      const [cxStr, cyStr] = key.split(':');
+      if (cxStr !== undefined && cyStr !== undefined) {
+        results.push({ x: Number(cxStr), y: Number(cyStr), type });
+      }
+    }
+    return results;
+  }
+
   // --- Dynamic Obstacle Management ---
 
   /**
@@ -111,21 +217,21 @@ export class SpatialGrid {
    */
   public hasObstacle(pos: Vector2D): boolean {
     const key = this.posKey(pos);
-    return this.obstacles.has(key);
+    return this.obstacles.has(key) || this.cellTypes.get(key) === 'WALL';
   }
 
   /**
    * Checks whether specific cell coordinates are blocked by an obstacle.
    */
   public hasObstacleAtCell(cx: number, cy: number): boolean {
-    return this.obstacles.has(this.cellKey(cx, cy));
+    return this.getCellType(cx, cy) === 'WALL';
   }
 
   /**
-   * Checks whether a cell coordinate is traversable (within bounds and no obstacle).
+   * Checks whether a cell coordinate is traversable (within bounds and not a wall).
    */
   public isTraversableCell(cx: number, cy: number): boolean {
-    return this.isCellInBounds(cx, cy) && !this.hasObstacleAtCell(cx, cy);
+    return this.isCellInBounds(cx, cy) && this.getCellType(cx, cy) !== 'WALL';
   }
 
   /** Returns all registered obstacle positions */
@@ -335,10 +441,12 @@ export class SpatialGrid {
     return results;
   }
 
-  /** Resets agents and obstacles */
+  /** Resets agents, obstacles, and cell types */
   public clear(): void {
     this.agentCells.clear();
     this.agents.clear();
     this.obstacles.clear();
+    this.cellTypes.clear();
+    this.stations.clear();
   }
 }

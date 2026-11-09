@@ -1,4 +1,4 @@
-import type { SimulationEvent, SimulationEventType, SimulationSnapshot } from '../core/Types.js';
+import type { SimulationEvent, SimulationEventType, SimulationFrame, SimulationSnapshot } from '../core/Types.js';
 export interface EventStoreOptions {
     /** Database file path or ':memory:' */
     readonly path?: string | undefined;
@@ -7,66 +7,48 @@ export interface EventStoreOptions {
 }
 /**
  * High-Performance Event Store backed by SQLite with WAL (Write-Ahead-Log) mode.
- * Supports transactional appending of events and simulation snapshots,
- * enabling full state reconstruction and deterministic replay.
+ * Supports transactional appending of events, periodic snapshots, and complete per-tick
+ * simulation frames for full deterministic Time-Travel Replay.
  */
 export declare class EventStore {
     private readonly db;
     private readonly insertEventStmt;
     private readonly insertSnapshotStmt;
+    private readonly insertFrameStmt;
     private readonly batchInsertEventsTx;
     private readonly saveSnapshotTx;
+    private readonly saveFrameTx;
     constructor(options?: EventStoreOptions);
     private configurePragmas;
     private initTables;
     private extractAggregateId;
-    /**
-     * Appends a single event to the database.
-     */
     appendEvent(event: SimulationEvent): void;
-    /**
-     * Appends multiple events in an atomic transaction block.
-     */
     appendEvents(events: readonly SimulationEvent[]): void;
-    /**
-     * Saves a full simulation state snapshot in a transaction block.
-     */
     saveSnapshot(snapshot: SimulationSnapshot): void;
     /**
-     * Retrieves simulation events within an optional tick range.
+     * Serializes and stores a complete simulation frame for a specific tick.
      */
+    saveFrame(frame: SimulationFrame): void;
+    /**
+     * Instantly retrieves the complete simulation frame at an exact historical tick.
+     */
+    getFrame(tick: number): SimulationFrame | null;
+    /**
+     * Retrieves a continuous range of historical simulation frames for replay interpolation.
+     */
+    getHistoryRange(fromTick: number, toTick: number): SimulationFrame[];
+    /** Returns total count of recorded simulation frames */
+    getFrameCount(): number;
+    /** Retrieves the latest recorded simulation frame */
+    getLatestFrame(): SimulationFrame | null;
     getEvents(fromTick?: number, toTick?: number): SimulationEvent[];
-    /**
-     * Retrieves events filtered by event type.
-     */
     getEventsByType(eventType: SimulationEventType): SimulationEvent[];
-    /**
-     * Retrieves all events associated with a specific agent.
-     */
     getEventsForAgent(agentId: string): SimulationEvent[];
-    /**
-     * Retrieves the latest snapshot available.
-     */
     getLatestSnapshot(): SimulationSnapshot | null;
-    /**
-     * Retrieves the latest snapshot taken at or before the specified tick.
-     */
     getSnapshotAtOrBefore(tick: number): SimulationSnapshot | null;
-    /**
-     * Returns total number of persisted events.
-     */
     getEventCount(): number;
-    /**
-     * Returns total number of persisted snapshots.
-     */
     getSnapshotCount(): number;
-    /**
-     * Truncates events and snapshots tables.
-     */
     clear(): void;
-    /**
-     * Closes the database connection safely.
-     */
     close(): void;
 }
 //# sourceMappingURL=EventStore.d.ts.map

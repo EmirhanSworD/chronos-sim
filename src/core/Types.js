@@ -2,6 +2,13 @@
  * chronos-sim: Core Type Definitions
  * Deterministic simulation and event-sourced state engine types.
  */
+export const CELL_COST = {
+    EMPTY: 1.0,
+    WALL: Infinity,
+    MUD: 5.0,
+    ROAD: 0.5,
+    STATION: 1.0,
+};
 export const DEFAULT_SIMULATION_CONFIG = {
     tickRateMs: 50,
     gridWidth: 100,
@@ -12,6 +19,10 @@ export const DEFAULT_SIMULATION_CONFIG = {
     snapshotIntervalTicks: 20,
     defaultAgentSpeed: 1.0,
     maxAStarIterations: 10000,
+    defaultMaxStamina: 100,
+    defaultEnergyBurnRate: 0.5,
+    threatEvasionDistance: 5.0,
+    rechargeThresholdPercent: 20,
 };
 // --- Vector Math Helper Utilities ---
 export function createVector(x, y) {
@@ -36,6 +47,16 @@ export function vectorAdd(a, b) {
 }
 export function vectorSubtract(a, b) {
     return { x: a.x - b.x, y: a.y - b.y };
+}
+export function vectorScale(v, scale) {
+    return { x: v.x * scale, y: v.y * scale };
+}
+export function vectorNormalize(v) {
+    const len = Math.hypot(v.x, v.y);
+    if (len === 0) {
+        return { x: 0, y: 0 };
+    }
+    return { x: v.x / len, y: v.y / len };
 }
 export function vectorLerp(a, b, t) {
     const clampedT = Math.max(0, Math.min(1, t));

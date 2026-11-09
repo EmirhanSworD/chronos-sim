@@ -8,8 +8,9 @@ export * from './core/Types.js';
 export * from './spatial/SpatialGrid.js';
 // Pathfinding (A*)
 export * from './spatial/Pathfinding.js';
-// Finite State Machine
+// Finite State Machine & Agent Behaviors
 export * from './fsm/StateMachine.js';
+export * from './fsm/AgentBehavior.js';
 // Simulation Engine
 export * from './core/Engine.js';
 // SQLite WAL Event Store

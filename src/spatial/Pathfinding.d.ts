@@ -8,9 +8,9 @@ export interface PathfindingOptions {
     readonly maxIterations?: number | undefined;
 }
 /**
- * Optimized A* (A-Star) Pathfinding Algorithm.
- * Supports dynamic obstacles, 8-directional movement, corner-cutting prevention,
- * and admissible Octile heuristic with deterministic tie-breaking.
+ * Optimized A* (A-Star) Pathfinding Algorithm with Terrain Costs.
+ * Evaluates variable cell movement costs (EMPTY: 1, ROAD: 0.5, MUD: 5, WALL: Infinity),
+ * selects the cheapest available route, and supports 8-directional movement with corner-cutting prevention.
  */
 export declare class AStarPathfinder {
     private readonly grid;
@@ -22,15 +22,20 @@ export declare class AStarPathfinder {
     private readonly directions;
     constructor(grid: SpatialGrid, options?: PathfindingOptions);
     /**
-     * Calculates the shortest path between start and target world coordinates.
-     * Returns an array of waypoints (cell centers in world coordinates),
-     * excluding the starting point and including the target.
-     * Returns empty array if no traversable path exists.
+     * Calculates the cheapest path between start and target world coordinates,
+     * factoring in terrain costs (gCost += terrainCost * stepDistance).
      */
     findPath(start: Vector2D, target: Vector2D): Vector2D[];
     /**
-     * Admissible Octile heuristic for 8-directional movement,
-     * falls back to Manhattan heuristic if diagonal is disabled.
+     * Calculates the cheapest path and returns both waypoints and accumulated traversal cost.
+     */
+    findPathWithCost(start: Vector2D, target: Vector2D): {
+        readonly path: Vector2D[];
+        readonly totalCost: number;
+    };
+    /**
+     * Admissible Octile heuristic scaled by the minimum possible terrain cost (ROAD = 0.5)
+     * to guarantee that A* never overestimates and consistently finds the cost-optimal route.
      */
     private heuristic;
     /**

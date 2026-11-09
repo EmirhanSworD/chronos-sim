@@ -2,25 +2,35 @@ import type {
   Agent,
   AgentBlockedEvent,
   AgentDespawnedEvent,
+  AgentEvadingEvent,
+  AgentExhaustedEvent,
   AgentMovedEvent,
   AgentReachedTargetEvent,
+  AgentRechargingEvent,
   AgentSpawnedEvent,
   AgentState,
   AgentStateChangedEvent,
+  CellType,
+  CellTypeChangedEvent,
   ObstacleAddedEvent,
   ObstacleRemovedEvent,
   PathCalculatedEvent,
   SimulationConfig,
   SimulationEvent,
   SimulationEventType,
+  SimulationFrame,
   SimulationSnapshot,
   SimulationStartedEvent,
   SimulationStoppedEvent,
   SnapshotCreatedEvent,
+  Threat,
+  ThreatRemovedEvent,
+  ThreatSpawnedEvent,
   TickEvent,
   Vector2D,
 } from './Types.js';
 import {
+  CELL_COST,
   DEFAULT_SIMULATION_CONFIG,
   createVector,
   vectorDistance,
@@ -30,6 +40,7 @@ import {
 import { SpatialGrid } from '../spatial/SpatialGrid.js';
 import { AStarPathfinder } from '../spatial/Pathfinding.js';
 import { AgentStateMachine } from '../fsm/StateMachine.js';
+import { AgentBehavior } from '../fsm/AgentBehavior.js';
 import type { EventStore } from '../storage/EventStore.js';
 
 export interface SpawnAgentOptions {
@@ -38,6 +49,11 @@ export interface SpawnAgentOptions {
   readonly target?: Vector2D | undefined;
   readonly speed?: number | undefined;
   readonly radius?: number | undefined;
+  readonly stamina?: number | undefined;
+  readonly maxStamina?: number | undefined;
+  readonly energyBurnRate?: number | undefined;
+  readonly waypoints?: readonly Vector2D[] | undefined;
+  readonly state?: AgentState | undefined;
 }
 
 export interface EngineOptions {
@@ -49,12 +65,13 @@ type EventCallback = (event: SimulationEvent) => void;
 type TickCallback = (tickEvent: TickEvent) => void;
 
 /**
- * Deterministic Fixed-Timestep Simulation Engine (Chronos Engine).
- * Orchestrates spatial indexing, pathfinding, agent state machines,
- * dynamic obstacle checking, and event sourcing.
+ * Deterministic Advanced Simulation Engine (Chronos Engine).
+ * Orchestrates spatial hash indexing, terrain-cost A* pathfinding,
+ * finite state machines, dynamic predator evasion, stamina management,
+ * and charging station cycles.
  */
 export class SimulationEngine {
-  readonly config: SimulationConfig;
+  config: SimulationConfig;
   readonly spatialGrid: SpatialGrid;
   readonly pathfinder: AStarPathfinder;
 
@@ -68,6 +85,9 @@ export class SimulationEngine {
 
   /** Agent state machines map: agentId -> FSM */
   private readonly fsms: Map<string, AgentStateMachine> = new Map();
+
+  /** Threats (Predators) in the environment */
+  private readonly threats: Map<string, Threat> = new Map();
 
   /** Event listeners */
   private readonly eventListeners: Set<EventCallback> = new Set();
@@ -149,10 +169,136 @@ export class SimulationEngine {
     return this.subscribe(callback);
   }
 
-  // --- Agent & Obstacle Mutators ---
+  // --- Threat (Predator) Management ---
+
+  public addThreat(threat: Threat): void {
+    this.threats.set(threat.id, threat);
+    const event: ThreatSpawnedEvent = {
+      type: 'THREAT_SPAWNED',
+      tick: this.currentTick,
+      timestamp: Date.now(),
+      threat,
+    };
+    this.emitEvent(event);
+  }
+
+  public removeThreat(threatId: string): boolean {
+    const existed = this.threats.delete(threatId);
+    if (existed) {
+      const event: ThreatRemovedEvent = {
+        type: 'THREAT_REMOVED',
+        tick: this.currentTick,
+        timestamp: Date.now(),
+        threatId,
+      };
+      this.emitEvent(event);
+      return true;
+    }
+    return false;
+  }
+
+  public getThreat(threatId: string): Threat | undefined {
+    return this.threats.get(threatId);
+  }
+
+  public getAllThreats(): readonly Threat[] {
+    return Array.from(this.threats.values());
+  }
+
+  public updateThreatPosition(threatId: string, position: Vector2D): boolean {
+    const threat = this.threats.get(threatId);
+    if (!threat) return false;
+    this.threats.set(threatId, { ...threat, position: createVector(position.x, position.y) });
+    return true;
+  }
+
+  // --- Charging Station & Terrain Management ---
+
+  public addStation(position: Vector2D): void {
+    this.spatialGrid.addStation(position);
+    this.emitEvent({
+      type: 'CELL_TYPE_CHANGED',
+      tick: this.currentTick,
+      timestamp: Date.now(),
+      position: createVector(position.x, position.y),
+      cellType: 'STATION',
+      cost: CELL_COST['STATION'],
+    });
+  }
+
+  public removeStation(position: Vector2D): boolean {
+    const removed = this.spatialGrid.removeStation(position);
+    if (removed) {
+      this.emitEvent({
+        type: 'CELL_TYPE_CHANGED',
+        tick: this.currentTick,
+        timestamp: Date.now(),
+        position: createVector(position.x, position.y),
+        cellType: 'EMPTY',
+        cost: CELL_COST['EMPTY'],
+      });
+      return true;
+    }
+    return false;
+  }
+
+  public getAllStations(): readonly Vector2D[] {
+    return this.spatialGrid.getStations();
+  }
+
+  public findNearestStation(position: Vector2D): Vector2D | null {
+    return this.spatialGrid.findNearestStation(position);
+  }
+
+  public setCellType(position: Vector2D, type: CellType): void {
+    const { cx, cy } = this.spatialGrid.worldToCell(position);
+    this.spatialGrid.setCellType(cx, cy, type);
+
+    if (type === 'WALL') {
+      this.spatialGrid.addObstacle(position);
+      // Reroute agents if current path crosses this newly created wall
+      for (const agent of this.getAllAgents()) {
+        if ((agent.state === 'NAVIGATING' || agent.state === 'PATROL') && agent.target) {
+          const hits = agent.path.some((p) => Math.floor(p.x) === cx && Math.floor(p.y) === cy);
+          if (hits) {
+            this.setAgentTarget(agent.id, agent.target);
+          }
+        }
+      }
+    } else if (this.spatialGrid.hasObstacle(position)) {
+      this.spatialGrid.removeObstacle(position);
+      // Unblock agents if this was an obstacle preventing their path
+      for (const agent of this.getAllAgents()) {
+        if (agent.state === 'BLOCKED' && agent.target) {
+          this.setAgentTarget(agent.id, agent.target);
+        }
+      }
+    }
+
+    this.emitEvent({
+      type: 'CELL_TYPE_CHANGED',
+      tick: this.currentTick,
+      timestamp: Date.now(),
+      position: createVector(position.x, position.y),
+      cellType: type,
+      cost: CELL_COST[type],
+    });
+  }
+
+  public getCellType(position: Vector2D): CellType {
+    const { cx, cy } = this.spatialGrid.worldToCell(position);
+    return this.spatialGrid.getCellType(cx, cy);
+  }
+
+  public getCellCost(position: Vector2D): number {
+    const { cx, cy } = this.spatialGrid.worldToCell(position);
+    return this.spatialGrid.getCellCost(cx, cy);
+  }
+
+  // --- Agent & Patrol Mutators ---
 
   /**
-   * Spawns a new agent into the simulation.
+   * Spawns a new agent into the simulation with stamina and waypoints.
    */
   public spawnAgent(options: SpawnAgentOptions): Agent {
     if (this.agents.has(options.id)) {
@@ -163,17 +309,28 @@ export class SimulationEngine {
       throw new Error(`Spawn position (${options.position.x}, ${options.position.y}) is out of bounds.`);
     }
 
-    const fsm = new AgentStateMachine(options.id, 'IDLE');
+    const initialState = options.state ?? 'IDLE';
+    const fsm = new AgentStateMachine(options.id, initialState);
     this.fsms.set(options.id, fsm);
+
+    const maxStamina = options.maxStamina ?? this.config.defaultMaxStamina ?? 100;
+    const stamina = options.stamina ?? maxStamina;
+    const energyBurnRate = options.energyBurnRate ?? this.config.defaultEnergyBurnRate ?? 0.5;
+    const waypoints = options.waypoints ? [...options.waypoints] : [];
 
     const agent: Agent = {
       id: options.id,
       position: createVector(options.position.x, options.position.y),
       target: null,
-      state: 'IDLE',
+      state: initialState,
       path: [],
       speed: options.speed ?? this.config.defaultAgentSpeed,
       radius: options.radius ?? this.config.cellSize * 0.4,
+      stamina,
+      maxStamina,
+      energyBurnRate,
+      waypoints,
+      patrolIndex: 0,
     };
 
     this.agents.set(agent.id, agent);
@@ -187,12 +344,68 @@ export class SimulationEngine {
     };
     this.emitEvent(spawnEvent);
 
-    // If initial target provided, compute path
-    if (options.target) {
+    // Initial patrol or target routing
+    if (waypoints.length > 0) {
+      this.setAgentPatrol(agent.id, waypoints);
+    } else if (options.target) {
       this.setAgentTarget(agent.id, options.target);
     }
 
     return this.agents.get(agent.id) ?? agent;
+  }
+
+  /**
+   * Configures patrol waypoints for an agent.
+   */
+  public setAgentPatrol(agentId: string, waypoints: readonly Vector2D[]): boolean {
+    const agent = this.agents.get(agentId);
+    const fsm = this.fsms.get(agentId);
+    if (!agent || !fsm || waypoints.length === 0) {
+      return false;
+    }
+
+    const firstWaypoint = waypoints[0];
+    if (!firstWaypoint) return false;
+
+    const computedPath = this.pathfinder.findPath(agent.position, firstWaypoint);
+    fsm.startPatrol('Starting patrol route');
+
+    const updated: Agent = {
+      ...agent,
+      waypoints: [...waypoints],
+      patrolIndex: 0,
+      target: createVector(firstWaypoint.x, firstWaypoint.y),
+      state: fsm.state,
+      path: computedPath,
+    };
+
+    this.agents.set(agentId, updated);
+    this.spatialGrid.updateAgent(updated);
+
+    this.emitEvent({
+      type: 'AGENT_STATE_CHANGED',
+      tick: this.currentTick,
+      timestamp: Date.now(),
+      agentId,
+      previousState: agent.state,
+      newState: fsm.state,
+      reason: 'Patrol started',
+    });
+
+    if (computedPath.length > 0) {
+      this.emitEvent({
+        type: 'PATH_CALCULATED',
+        tick: this.currentTick,
+        timestamp: Date.now(),
+        agentId,
+        from: agent.position,
+        to: firstWaypoint,
+        path: computedPath,
+        pathLength: computedPath.length,
+      });
+    }
+
+    return true;
   }
 
   /**
@@ -232,7 +445,6 @@ export class SimulationEngine {
     const computedPath = this.pathfinder.findPath(agent.position, target);
 
     if (computedPath.length === 0) {
-      // Path blocked or unreachable
       const previousState = fsm.state;
       fsm.block('No valid path to target');
 
@@ -270,7 +482,6 @@ export class SimulationEngine {
       return false;
     }
 
-    // Path successfully calculated
     const previousState = fsm.state;
     fsm.startNavigation('New target set with valid path');
 
@@ -353,15 +564,14 @@ export class SimulationEngine {
 
   /**
    * Executes a single fixed simulation tick deterministically.
-   * Updates all agents, checks obstacle collisions, handles re-routing,
-   * emits events, and persists snapshots at designated intervals.
+   * Updates threats, manages stamina, handles predator evasion,
+   * routes to charging stations, and advances agents along paths.
    */
   public step(): TickEvent {
     this.currentTick++;
     const tickStart = Date.now();
     const tickEvents: SimulationEvent[] = [];
 
-    // Temporary collector for events generated during this tick
     const tickEmitter = (event: SimulationEvent): void => {
       tickEvents.push(event);
       for (const listener of this.eventListeners) {
@@ -369,7 +579,7 @@ export class SimulationEngine {
       }
     };
 
-    // Process agents in deterministic order by ID
+    // Deterministic agent processing order
     const sortedAgentIds = Array.from(this.agents.keys()).sort();
 
     for (const agentId of sortedAgentIds) {
@@ -382,7 +592,7 @@ export class SimulationEngine {
       this.updateAgentStep(agent, fsm, tickEmitter);
     }
 
-    // Check periodic snapshot creation
+    // Periodic state snapshots
     if (this.currentTick % this.config.snapshotIntervalTicks === 0) {
       const snapshot = this.getSnapshot();
       if (this.eventStore) {
@@ -399,9 +609,32 @@ export class SimulationEngine {
       tickEmitter(snapshotEvent);
     }
 
-    // Persist all tick events atomically to EventStore
+    // Persist events to EventStore
     if (this.eventStore && tickEvents.length > 0) {
       this.eventStore.appendEvents(tickEvents);
+    }
+
+    // Persist complete per-tick frame to EventStore for Time-Travel Replay
+    if (this.eventStore) {
+      const frame: SimulationFrame = {
+        tick: this.currentTick,
+        timestamp: tickStart,
+        agents: Array.from(this.agents.values()).map((a) => ({
+          ...a,
+          position: createVector(a.position.x, a.position.y),
+          target: a.target ? createVector(a.target.x, a.target.y) : null,
+          path: a.path.map((p) => createVector(p.x, p.y)),
+          waypoints: a.waypoints.map((w) => createVector(w.x, w.y)),
+        })),
+        obstacles: this.spatialGrid.getAllObstacles().map((o) => createVector(o.x, o.y)),
+        cellTypes: this.spatialGrid.getAllCellTypes(),
+        threats: Array.from(this.threats.values()).map((t) => ({
+          ...t,
+          position: createVector(t.position.x, t.position.y),
+        })),
+        stations: this.spatialGrid.getStations().map((s) => createVector(s.x, s.y)),
+      };
+      this.eventStore.saveFrame(frame);
     }
 
     const tickSummary: TickEvent = {
@@ -412,7 +645,6 @@ export class SimulationEngine {
       events: tickEvents,
     };
 
-    // Notify tick listeners
     for (const tickListener of this.tickListeners) {
       tickListener(tickSummary);
     }
@@ -421,14 +653,185 @@ export class SimulationEngine {
   }
 
   /**
-   * Updates a single agent during the simulation tick.
+   * Updates a single agent during the simulation tick:
+   * 1. Evaluates predator threat proximity (< 5.0 units) -> triggers EVADING state and escape vector.
+   * 2. Checks stamina (< 20%) -> prioritizes routing to nearest STATION cell.
+   * 3. Executes recharging if on station cell.
+   * 4. Updates patrol waypoint cycling or normal navigation.
+   * 5. Burns stamina based on terrain movement cost.
    */
   private updateAgentStep(
     agent: Agent,
     fsm: AgentStateMachine,
     emit: (event: SimulationEvent) => void
   ): void {
-    // 1. If agent is BLOCKED, attempt to re-route if target is assigned
+    // 0. Check for exhaustion
+    if (agent.stamina <= 0 && fsm.state !== 'EXHAUSTED') {
+      const prevState = fsm.state;
+      fsm.exhaust('Stamina depleted to zero');
+      const exhaustedAgent: Agent = { ...agent, state: fsm.state, path: [] };
+      this.agents.set(agent.id, exhaustedAgent);
+      this.spatialGrid.updateAgent(exhaustedAgent);
+
+      emit({
+        type: 'AGENT_EXHAUSTED',
+        tick: this.currentTick,
+        timestamp: Date.now(),
+        agentId: agent.id,
+        position: agent.position,
+      });
+
+      emit({
+        type: 'AGENT_STATE_CHANGED',
+        tick: this.currentTick,
+        timestamp: Date.now(),
+        agentId: agent.id,
+        previousState: prevState,
+        newState: 'EXHAUSTED',
+        reason: 'Stamina fully depleted',
+      });
+      return;
+    }
+
+    if (fsm.state === 'EXHAUSTED') {
+      return; // Agent is immobilized until recharged
+    }
+
+    // 1. Threat Proximity Check (Predator within 5.0 units)
+    const evasionDistanceThreshold = this.config.threatEvasionDistance ?? 5.0;
+    const evasion = AgentBehavior.evaluateThreatEvasion(
+      agent.position,
+      this.getAllThreats(),
+      this.spatialGrid,
+      evasionDistanceThreshold
+    );
+
+    if (evasion.shouldEvade && evasion.threat && evasion.evasionTarget) {
+      const prevState = fsm.state;
+      fsm.evadeThreat(`Predator ${evasion.threat.id} within 5.0 units`);
+
+      const evasionPath = this.pathfinder.findPath(agent.position, evasion.evasionTarget);
+      const evadingAgent: Agent = {
+        ...agent,
+        state: fsm.state,
+        target: evasion.evasionTarget,
+        path: evasionPath.length > 0 ? evasionPath : [evasion.evasionTarget],
+      };
+      this.agents.set(agent.id, evadingAgent);
+      this.spatialGrid.updateAgent(evadingAgent);
+      agent = evadingAgent;
+
+      emit({
+        type: 'AGENT_EVADING',
+        tick: this.currentTick,
+        timestamp: Date.now(),
+        agentId: agent.id,
+        threatId: evasion.threat.id,
+        threatPosition: evasion.threat.position,
+        evasionVector: evasion.evasionTarget,
+      });
+
+      if (prevState !== 'EVADING') {
+        emit({
+          type: 'AGENT_STATE_CHANGED',
+          tick: this.currentTick,
+          timestamp: Date.now(),
+          agentId: agent.id,
+          previousState: prevState,
+          newState: 'EVADING',
+          reason: 'Threat evasion triggered',
+        });
+      }
+    }
+
+    // 2. Low Stamina (< 20%) & Charging Station Seek
+    const isLowStamina = AgentBehavior.isLowStamina(agent, this.config.rechargeThresholdPercent ?? 20);
+
+    if (fsm.state === 'RECHARGING') {
+      const currentCell = this.spatialGrid.worldToCell(agent.position);
+      const isAtStation = this.spatialGrid.getCellType(currentCell.cx, currentCell.cy) === 'STATION';
+
+      if (isAtStation) {
+        // Recharge stamina
+        const rechargedStamina = AgentBehavior.rechargeStamina(agent.stamina, agent.maxStamina, 10.0);
+        const rechargedAgent: Agent = { ...agent, stamina: rechargedStamina };
+        this.agents.set(agent.id, rechargedAgent);
+        agent = rechargedAgent;
+
+        emit({
+          type: 'AGENT_RECHARGING',
+          tick: this.currentTick,
+          timestamp: Date.now(),
+          agentId: agent.id,
+          stationPosition: agent.position,
+          currentStamina: rechargedStamina,
+        });
+
+        if (rechargedStamina >= agent.maxStamina) {
+          // Fully recharged! Resume previous mission
+          if (agent.waypoints.length > 0) {
+            fsm.startPatrol('Recharge complete, resuming patrol');
+            const targetWp = agent.waypoints[agent.patrolIndex ?? 0] ?? agent.waypoints[0]!;
+            const resumePath = this.pathfinder.findPath(agent.position, targetWp);
+            const resumedAgent: Agent = {
+              ...agent,
+              state: fsm.state,
+              target: targetWp,
+              path: resumePath,
+            };
+            this.agents.set(agent.id, resumedAgent);
+            this.spatialGrid.updateAgent(resumedAgent);
+          } else {
+            fsm.rechargeComplete('Recharge complete');
+            const idleAgent: Agent = { ...agent, state: fsm.state, path: [] };
+            this.agents.set(agent.id, idleAgent);
+            this.spatialGrid.updateAgent(idleAgent);
+          }
+
+          emit({
+            type: 'AGENT_STATE_CHANGED',
+            tick: this.currentTick,
+            timestamp: Date.now(),
+            agentId: agent.id,
+            previousState: 'RECHARGING',
+            newState: fsm.state,
+            reason: 'Recharge complete (100%)',
+          });
+          return;
+        }
+        return; // Stay at station while actively recharging
+      }
+    } else if (isLowStamina && fsm.state !== 'EVADING') {
+      // Divert to nearest station
+      const nearestStation = this.findNearestStation(agent.position);
+      if (nearestStation) {
+        const prevState = fsm.state;
+        fsm.seekRecharge('Low stamina (<20%), seeking station');
+
+        const stationPath = this.pathfinder.findPath(agent.position, nearestStation);
+        const seekingAgent: Agent = {
+          ...agent,
+          state: fsm.state,
+          target: nearestStation,
+          path: stationPath,
+        };
+        this.agents.set(agent.id, seekingAgent);
+        this.spatialGrid.updateAgent(seekingAgent);
+        agent = seekingAgent;
+
+        emit({
+          type: 'AGENT_STATE_CHANGED',
+          tick: this.currentTick,
+          timestamp: Date.now(),
+          agentId: agent.id,
+          previousState: prevState,
+          newState: 'RECHARGING',
+          reason: 'Low stamina (<20%), routing to station',
+        });
+      }
+    }
+
+    // 3. Blocked state handling
     if (fsm.state === 'BLOCKED' && agent.target) {
       const newPath = this.pathfinder.findPath(agent.position, agent.target);
       if (newPath.length > 0) {
@@ -466,23 +869,25 @@ export class SimulationEngine {
       return;
     }
 
-    // 2. If agent is not NAVIGATING, nothing to move
-    if (fsm.state !== 'NAVIGATING' || agent.path.length === 0 || !agent.target) {
+    // 4. Movement Execution for moving states (NAVIGATING, PATROL, EVADING, RECHARGING)
+    const isMovingState =
+      fsm.state === 'NAVIGATING' ||
+      fsm.state === 'PATROL' ||
+      fsm.state === 'EVADING' ||
+      fsm.state === 'RECHARGING';
+
+    if (!isMovingState || agent.path.length === 0 || !agent.target) {
       return;
     }
 
     const nextWaypoint = agent.path[0];
-    if (!nextWaypoint) {
-      return;
-    }
+    if (!nextWaypoint) return;
 
-    // Check if next waypoint has become an obstacle
+    // Check if next waypoint has become blocked
     if (this.spatialGrid.hasObstacle(nextWaypoint)) {
-      // Current path is blocked! Attempt recalculation
       const recalculated = this.pathfinder.findPath(agent.position, agent.target);
 
       if (recalculated.length === 0) {
-        // Trapped / completely blocked
         fsm.block('Waypoint occupied by obstacle, no detour found');
         const blockedAgent: Agent = {
           ...agent,
@@ -501,30 +906,8 @@ export class SimulationEngine {
           target: agent.target,
           reason: 'Waypoint blocked by obstacle',
         });
-
-        emit({
-          type: 'AGENT_STATE_CHANGED',
-          tick: this.currentTick,
-          timestamp: Date.now(),
-          agentId: agent.id,
-          previousState: 'NAVIGATING',
-          newState: 'BLOCKED',
-          reason: 'Path blocked by dynamic obstacle',
-        });
         return;
       }
-
-      // Detour found, update path and continue navigation
-      emit({
-        type: 'PATH_CALCULATED',
-        tick: this.currentTick,
-        timestamp: Date.now(),
-        agentId: agent.id,
-        from: agent.position,
-        to: agent.target,
-        path: recalculated,
-        pathLength: recalculated.length,
-      });
 
       const detourAgent: Agent = {
         ...agent,
@@ -534,17 +917,26 @@ export class SimulationEngine {
       agent = detourAgent;
     }
 
-    // 3. Move towards waypoint
     const currentWaypoint = agent.path[0];
-    if (!currentWaypoint) {
-      return;
-    }
+    if (!currentWaypoint) return;
 
     const dist = vectorDistance(agent.position, currentWaypoint);
     const stepDist = agent.speed;
 
+    // Determine terrain cost at target coordinate
+    const targetCell = this.spatialGrid.worldToCell(currentWaypoint);
+    const terrainCost = this.spatialGrid.getCellCost(targetCell.cx, targetCell.cy);
+
+    // Calculate energy burn (MUD = 5x, ROAD = 0.5x, EVADING = 1.5x)
+    const energyBurn = AgentBehavior.calculateEnergyBurn(
+      agent.energyBurnRate,
+      terrainCost,
+      fsm.state === 'EVADING'
+    );
+    const updatedStamina = AgentBehavior.burnStamina(agent.stamina, energyBurn);
+
     if (dist <= stepDist || vectorEquals(agent.position, currentWaypoint, 1e-4)) {
-      // Waypoint reached
+      // Reached current waypoint
       const previousPos = agent.position;
       const newPos = createVector(currentWaypoint.x, currentWaypoint.y);
       const remainingPath = agent.path.slice(1);
@@ -556,55 +948,98 @@ export class SimulationEngine {
         agentId: agent.id,
         from: previousPos,
         to: newPos,
+        stamina: updatedStamina,
       });
 
       if (remainingPath.length === 0) {
-        // Destination target reached!
-        fsm.reachTarget('Agent reached final target waypoint');
-        const completedAgent: Agent = {
-          ...agent,
-          position: newPos,
-          state: fsm.state,
-          path: [],
-        };
-        this.agents.set(agent.id, completedAgent);
-        this.spatialGrid.updateAgent(completedAgent);
+        // Final destination of current trajectory reached
+        if (fsm.state === 'PATROL' && agent.waypoints.length > 0) {
+          // Advance to next patrol waypoint
+          const nextIndex = ((agent.patrolIndex ?? 0) + 1) % agent.waypoints.length;
+          const nextWp = agent.waypoints[nextIndex]!;
+          const nextPath = this.pathfinder.findPath(newPos, nextWp);
 
-        emit({
-          type: 'AGENT_REACHED_TARGET',
-          tick: this.currentTick,
-          timestamp: Date.now(),
-          agentId: agent.id,
-          target: newPos,
-        });
+          const patrollingAgent: Agent = {
+            ...agent,
+            position: newPos,
+            stamina: updatedStamina,
+            patrolIndex: nextIndex,
+            target: nextWp,
+            path: nextPath,
+          };
+          this.agents.set(agent.id, patrollingAgent);
+          this.spatialGrid.updateAgent(patrollingAgent);
+        } else if (fsm.state === 'EVADING') {
+          // Evasion step completed, check if still threatened
+          const evadingCompletedAgent: Agent = {
+            ...agent,
+            position: newPos,
+            stamina: updatedStamina,
+            path: [],
+          };
+          this.agents.set(agent.id, evadingCompletedAgent);
+          this.spatialGrid.updateAgent(evadingCompletedAgent);
+        } else if (fsm.state === 'RECHARGING') {
+          // Arrived at charging station
+          const atStationAgent: Agent = {
+            ...agent,
+            position: newPos,
+            stamina: updatedStamina,
+            path: [],
+          };
+          this.agents.set(agent.id, atStationAgent);
+          this.spatialGrid.updateAgent(atStationAgent);
+        } else {
+          // Target reached for general NAVIGATING
+          fsm.reachTarget('Agent reached final target waypoint');
+          const completedAgent: Agent = {
+            ...agent,
+            position: newPos,
+            stamina: updatedStamina,
+            state: fsm.state,
+            path: [],
+          };
+          this.agents.set(agent.id, completedAgent);
+          this.spatialGrid.updateAgent(completedAgent);
 
-        emit({
-          type: 'AGENT_STATE_CHANGED',
-          tick: this.currentTick,
-          timestamp: Date.now(),
-          agentId: agent.id,
-          previousState: 'NAVIGATING',
-          newState: fsm.state,
-          reason: 'Destination reached',
-        });
+          emit({
+            type: 'AGENT_REACHED_TARGET',
+            tick: this.currentTick,
+            timestamp: Date.now(),
+            agentId: agent.id,
+            target: newPos,
+          });
+
+          emit({
+            type: 'AGENT_STATE_CHANGED',
+            tick: this.currentTick,
+            timestamp: Date.now(),
+            agentId: agent.id,
+            previousState: 'NAVIGATING',
+            newState: fsm.state,
+            reason: 'Destination reached',
+          });
+        }
       } else {
-        // Advance to next waypoint
+        // Advance along path
         const advancedAgent: Agent = {
           ...agent,
           position: newPos,
+          stamina: updatedStamina,
           path: remainingPath,
         };
         this.agents.set(agent.id, advancedAgent);
         this.spatialGrid.updateAgent(advancedAgent);
       }
     } else {
-      // Partial step towards current waypoint
+      // Partial step
       const previousPos = agent.position;
       const newPos = vectorLerp(agent.position, currentWaypoint, stepDist / dist);
 
       const movedAgent: Agent = {
         ...agent,
         position: newPos,
+        stamina: updatedStamina,
       };
       this.agents.set(agent.id, movedAgent);
       this.spatialGrid.updateAgent(movedAgent);
@@ -616,6 +1051,7 @@ export class SimulationEngine {
         agentId: agent.id,
         from: previousPos,
         to: newPos,
+        stamina: updatedStamina,
       });
     }
   }
@@ -632,9 +1068,6 @@ export class SimulationEngine {
 
   // --- Simulation Loop Control ---
 
-  /**
-   * Starts the fixed-timestep simulation ticker.
-   */
   public start(): void {
     if (this.isRunning) {
       return;
@@ -654,9 +1087,6 @@ export class SimulationEngine {
     }, this.config.tickRateMs);
   }
 
-  /**
-   * Stops the simulation ticker.
-   */
   public stop(): void {
     if (!this.isRunning) {
       return;
@@ -676,11 +1106,120 @@ export class SimulationEngine {
     this.emitEvent(stoppedEvent);
   }
 
-  // --- Snapshot & State Restoration ---
+  /**
+   * Dynamically adjusts the tick rate / simulation speed in milliseconds.
+   */
+  public setTickRate(tickRateMs: number): void {
+    const clampedRate = Math.max(10, Math.min(2000, tickRateMs));
+    this.config = {
+      ...this.config,
+      tickRateMs: clampedRate,
+    };
+
+    if (this.isRunning) {
+      if (this.timerHandle) {
+        clearInterval(this.timerHandle);
+      }
+      this.timerHandle = setInterval(() => {
+        this.step();
+      }, this.config.tickRateMs);
+    }
+  }
+
+  // --- Time-Travel Replay & Snapshot Restoration ---
 
   /**
-   * Takes a full snapshot of the current simulation state.
+   * Captures the current complete simulation frame for state preservation.
    */
+  public getCurrentFrame(): SimulationFrame {
+    return {
+      tick: this.currentTick,
+      timestamp: Date.now(),
+      agents: Array.from(this.agents.values()).map((a) => ({
+        ...a,
+        position: createVector(a.position.x, a.position.y),
+        target: a.target ? createVector(a.target.x, a.target.y) : null,
+        path: a.path.map((p) => createVector(p.x, p.y)),
+        waypoints: a.waypoints.map((w) => createVector(w.x, w.y)),
+      })),
+      obstacles: this.spatialGrid.getAllObstacles().map((o) => createVector(o.x, o.y)),
+      cellTypes: this.spatialGrid.getAllCellTypes(),
+      threats: Array.from(this.threats.values()).map((t) => ({
+        ...t,
+        position: createVector(t.position.x, t.position.y),
+      })),
+      stations: this.spatialGrid.getStations().map((s) => createVector(s.x, s.y)),
+    };
+  }
+
+  /**
+   * Restores the exact simulation state from a serialized SimulationFrame.
+   */
+  public restoreFromFrame(frame: SimulationFrame): void {
+    this.currentTick = frame.tick;
+    this.spatialGrid.clear();
+    this.agents.clear();
+    this.fsms.clear();
+    this.threats.clear();
+
+    for (const ct of frame.cellTypes) {
+      this.spatialGrid.setCellType(ct.x, ct.y, ct.type);
+    }
+
+    for (const obstacle of frame.obstacles) {
+      this.spatialGrid.addObstacle(obstacle);
+    }
+
+    for (const st of frame.stations) {
+      this.spatialGrid.addStation(st);
+    }
+
+    for (const th of frame.threats) {
+      this.threats.set(th.id, th);
+    }
+
+    for (const agentData of frame.agents) {
+      const fsm = new AgentStateMachine(agentData.id, agentData.state);
+      this.fsms.set(agentData.id, fsm);
+
+      const agent: Agent = {
+        id: agentData.id,
+        position: createVector(agentData.position.x, agentData.position.y),
+        target: agentData.target ? createVector(agentData.target.x, agentData.target.y) : null,
+        state: agentData.state,
+        path: agentData.path.map((p) => createVector(p.x, p.y)),
+        speed: agentData.speed,
+        radius: agentData.radius,
+        stamina: agentData.stamina,
+        maxStamina: agentData.maxStamina,
+        energyBurnRate: agentData.energyBurnRate,
+        waypoints: agentData.waypoints.map((w) => createVector(w.x, w.y)),
+        patrolIndex: agentData.patrolIndex ?? 0,
+      };
+
+      this.agents.set(agent.id, agent);
+      this.spatialGrid.insertAgent(agent);
+    }
+  }
+
+  /**
+   * Seeks to an exact historical tick in time using recorded simulation frames.
+   * Returns true if frame existed and state was restored, false otherwise.
+   */
+  public seekToTick(tick: number): boolean {
+    if (!this.eventStore) {
+      return false;
+    }
+    const frame = this.eventStore.getFrame(tick);
+    if (!frame) {
+      return false;
+    }
+    this.restoreFromFrame(frame);
+    return true;
+  }
+
+  // --- Snapshot & State Restoration ---
+
   public getSnapshot(): SimulationSnapshot {
     return {
       tick: this.currentTick,
@@ -690,23 +1229,43 @@ export class SimulationEngine {
         position: createVector(a.position.x, a.position.y),
         target: a.target ? createVector(a.target.x, a.target.y) : null,
         path: a.path.map((p) => createVector(p.x, p.y)),
+        waypoints: a.waypoints.map((w) => createVector(w.x, w.y)),
       })),
       obstacles: this.spatialGrid.getAllObstacles().map((o) => createVector(o.x, o.y)),
       config: { ...this.config },
+      cellTypes: this.spatialGrid.getAllCellTypes(),
+      threats: Array.from(this.threats.values()),
+      stations: this.spatialGrid.getStations().map((s) => createVector(s.x, s.y)),
     };
   }
 
-  /**
-   * Restores the simulation state from a snapshot.
-   */
   public restoreFromSnapshot(snapshot: SimulationSnapshot): void {
     this.currentTick = snapshot.tick;
     this.spatialGrid.clear();
     this.agents.clear();
     this.fsms.clear();
+    this.threats.clear();
+
+    if (snapshot.cellTypes) {
+      for (const ct of snapshot.cellTypes) {
+        this.spatialGrid.setCellType(ct.x, ct.y, ct.type);
+      }
+    }
 
     for (const obstacle of snapshot.obstacles) {
       this.spatialGrid.addObstacle(obstacle);
+    }
+
+    if (snapshot.stations) {
+      for (const st of snapshot.stations) {
+        this.spatialGrid.addStation(st);
+      }
+    }
+
+    if (snapshot.threats) {
+      for (const th of snapshot.threats) {
+        this.threats.set(th.id, th);
+      }
     }
 
     for (const agentData of snapshot.agents) {
@@ -721,6 +1280,11 @@ export class SimulationEngine {
         path: agentData.path.map((p) => createVector(p.x, p.y)),
         speed: agentData.speed,
         radius: agentData.radius,
+        stamina: agentData.stamina,
+        maxStamina: agentData.maxStamina,
+        energyBurnRate: agentData.energyBurnRate,
+        waypoints: agentData.waypoints.map((w) => createVector(w.x, w.y)),
+        patrolIndex: agentData.patrolIndex ?? 0,
       };
 
       this.agents.set(agent.id, agent);
@@ -728,9 +1292,6 @@ export class SimulationEngine {
     }
   }
 
-  /**
-   * Cleans up all engine resources and stops active timers.
-   */
   public dispose(): void {
     this.stop();
     this.eventListeners.clear();
@@ -738,5 +1299,6 @@ export class SimulationEngine {
     this.spatialGrid.clear();
     this.agents.clear();
     this.fsms.clear();
+    this.threats.clear();
   }
 }

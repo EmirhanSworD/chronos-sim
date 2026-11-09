@@ -1,4 +1,4 @@
-import type { Agent, AgentState, SimulationConfig, SimulationEvent, SimulationEventType, SimulationSnapshot, TickEvent, Vector2D } from './Types.js';
+import type { Agent, AgentState, CellType, SimulationConfig, SimulationEvent, SimulationEventType, SimulationFrame, SimulationSnapshot, Threat, TickEvent, Vector2D } from './Types.js';
 import { SpatialGrid } from '../spatial/SpatialGrid.js';
 import { AStarPathfinder } from '../spatial/Pathfinding.js';
 import type { EventStore } from '../storage/EventStore.js';
@@ -8,6 +8,11 @@ export interface SpawnAgentOptions {
     readonly target?: Vector2D | undefined;
     readonly speed?: number | undefined;
     readonly radius?: number | undefined;
+    readonly stamina?: number | undefined;
+    readonly maxStamina?: number | undefined;
+    readonly energyBurnRate?: number | undefined;
+    readonly waypoints?: readonly Vector2D[] | undefined;
+    readonly state?: AgentState | undefined;
 }
 export interface EngineOptions {
     readonly config?: Partial<SimulationConfig> | undefined;
@@ -16,12 +21,13 @@ export interface EngineOptions {
 type EventCallback = (event: SimulationEvent) => void;
 type TickCallback = (tickEvent: TickEvent) => void;
 /**
- * Deterministic Fixed-Timestep Simulation Engine (Chronos Engine).
- * Orchestrates spatial indexing, pathfinding, agent state machines,
- * dynamic obstacle checking, and event sourcing.
+ * Deterministic Advanced Simulation Engine (Chronos Engine).
+ * Orchestrates spatial hash indexing, terrain-cost A* pathfinding,
+ * finite state machines, dynamic predator evasion, stamina management,
+ * and charging station cycles.
  */
 export declare class SimulationEngine {
-    readonly config: SimulationConfig;
+    config: SimulationConfig;
     readonly spatialGrid: SpatialGrid;
     readonly pathfinder: AStarPathfinder;
     private currentTick;
@@ -32,6 +38,8 @@ export declare class SimulationEngine {
     private readonly agents;
     /** Agent state machines map: agentId -> FSM */
     private readonly fsms;
+    /** Threats (Predators) in the environment */
+    private readonly threats;
     /** Event listeners */
     private readonly eventListeners;
     private readonly tickListeners;
@@ -49,10 +57,26 @@ export declare class SimulationEngine {
     on<T extends SimulationEventType>(type: T, listener: (event: Extract<SimulationEvent, {
         type: T;
     }>) => void): () => void;
+    addThreat(threat: Threat): void;
+    removeThreat(threatId: string): boolean;
+    getThreat(threatId: string): Threat | undefined;
+    getAllThreats(): readonly Threat[];
+    updateThreatPosition(threatId: string, position: Vector2D): boolean;
+    addStation(position: Vector2D): void;
+    removeStation(position: Vector2D): boolean;
+    getAllStations(): readonly Vector2D[];
+    findNearestStation(position: Vector2D): Vector2D | null;
+    setCellType(position: Vector2D, type: CellType): void;
+    getCellType(position: Vector2D): CellType;
+    getCellCost(position: Vector2D): number;
     /**
-     * Spawns a new agent into the simulation.
+     * Spawns a new agent into the simulation with stamina and waypoints.
      */
     spawnAgent(options: SpawnAgentOptions): Agent;
+    /**
+     * Configures patrol waypoints for an agent.
+     */
+    setAgentPatrol(agentId: string, waypoints: readonly Vector2D[]): boolean;
     /**
      * Removes an agent from the simulation.
      */
@@ -71,35 +95,42 @@ export declare class SimulationEngine {
     removeObstacle(position: Vector2D): boolean;
     /**
      * Executes a single fixed simulation tick deterministically.
-     * Updates all agents, checks obstacle collisions, handles re-routing,
-     * emits events, and persists snapshots at designated intervals.
+     * Updates threats, manages stamina, handles predator evasion,
+     * routes to charging stations, and advances agents along paths.
      */
     step(): TickEvent;
     /**
-     * Updates a single agent during the simulation tick.
+     * Updates a single agent during the simulation tick:
+     * 1. Evaluates predator threat proximity (< 5.0 units) -> triggers EVADING state and escape vector.
+     * 2. Checks stamina (< 20%) -> prioritizes routing to nearest STATION cell.
+     * 3. Executes recharging if on station cell.
+     * 4. Updates patrol waypoint cycling or normal navigation.
+     * 5. Burns stamina based on terrain movement cost.
      */
     private updateAgentStep;
     /** Emits an event immediately to subscribers and EventStore */
     private emitEvent;
-    /**
-     * Starts the fixed-timestep simulation ticker.
-     */
     start(): void;
-    /**
-     * Stops the simulation ticker.
-     */
     stop(): void;
     /**
-     * Takes a full snapshot of the current simulation state.
+     * Dynamically adjusts the tick rate / simulation speed in milliseconds.
      */
+    setTickRate(tickRateMs: number): void;
+    /**
+     * Captures the current complete simulation frame for state preservation.
+     */
+    getCurrentFrame(): SimulationFrame;
+    /**
+     * Restores the exact simulation state from a serialized SimulationFrame.
+     */
+    restoreFromFrame(frame: SimulationFrame): void;
+    /**
+     * Seeks to an exact historical tick in time using recorded simulation frames.
+     * Returns true if frame existed and state was restored, false otherwise.
+     */
+    seekToTick(tick: number): boolean;
     getSnapshot(): SimulationSnapshot;
-    /**
-     * Restores the simulation state from a snapshot.
-     */
     restoreFromSnapshot(snapshot: SimulationSnapshot): void;
-    /**
-     * Cleans up all engine resources and stops active timers.
-     */
     dispose(): void;
 }
 export {};

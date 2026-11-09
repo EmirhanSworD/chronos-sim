@@ -53,6 +53,10 @@ describe('SpatialGrid', () => {
       path: [],
       speed: 1,
       radius: 1,
+      stamina: 100,
+      maxStamina: 100,
+      energyBurnRate: 0.5,
+      waypoints: [],
     };
 
     const agent2: Agent = {
@@ -63,6 +67,10 @@ describe('SpatialGrid', () => {
       path: [],
       speed: 1,
       radius: 1,
+      stamina: 100,
+      maxStamina: 100,
+      energyBurnRate: 0.5,
+      waypoints: [],
     };
 
     const agent3: Agent = {
@@ -73,6 +81,10 @@ describe('SpatialGrid', () => {
       path: [],
       speed: 1,
       radius: 1,
+      stamina: 100,
+      maxStamina: 100,
+      energyBurnRate: 0.5,
+      waypoints: [],
     };
 
     grid.insertAgent(agent1);
